@@ -88,7 +88,7 @@ A: Most logic is cross-platform, but the GUI focus and silent launch polish targ
 ---
 
 ## License
-MIT-ish (check `MDFILES/LICENSE.txt`). Share, break, improve—just don’t pawn it off as your own without buying us coffee.(that was a joke XD) feel free to use it as you wish guys :]
+MIT-ish (check `MDFILES/LICENSE.txt`). Share, break, improve—just don’t pawn it off as your own without buying us coffee.(that was a joke XD) feel free to use it as you wish humans :]
 
 ---
 
