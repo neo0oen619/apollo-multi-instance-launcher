@@ -172,7 +172,12 @@ def _configure_logging() -> logging.Logger:
     if not root.handlers:
         root.setLevel(logging.INFO)
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s :: %(message)s")
-        stream_handler = logging.StreamHandler(stream=sys.stdout)
+        stream = getattr(sys, "stdout", None)
+        if not (stream and hasattr(stream, "write")):
+            stream = getattr(sys, "stderr", None)
+        if not (stream and hasattr(stream, "write")):
+            stream = open(os.devnull, "w", encoding="utf-8", errors="ignore")
+        stream_handler = logging.StreamHandler(stream=stream)
         stream_handler.setFormatter(formatter)
         root.addHandler(stream_handler)
         log_path = SESSION_LOG_PATH
@@ -384,6 +389,31 @@ def find_free_sunshine_base_port(start: int, used_ports: List[int], limit: int =
     return candidate
 
 
+def is_windows_admin() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_as_admin(argv: List[str]) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        script_path = str(Path(__file__).resolve())
+        params = subprocess.list2cmdline([script_path] + list(argv))
+        workdir = str(Path.cwd())
+        result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, workdir, 1)
+        return result > 32
+    except Exception as exc:
+        LOGGER.warning("Failed to relaunch elevated: %s", exc)
+        return False
+
+
 
 def ensure_profile_unique_files(profile: InstanceProfile) -> None:
     slug = safe_slug(profile.name) or "instance"
@@ -445,7 +475,7 @@ def repair_profile_defaults(profile: InstanceProfile) -> None:
     if base_config in {"", "."} and detected_conf is not None:
         profile.base_config = str(detected_conf)
     if profile.web_port < SUNSHINE_BASE_PORT_MIN or profile.web_port > SUNSHINE_BASE_PORT_MAX:
-        profile.web_port = find_free_port(SUNSHINE_BASE_PORT_DEFAULT)
+        profile.web_port = find_free_sunshine_base_port(SUNSHINE_BASE_PORT_DEFAULT, [])
     if not profile.sunshine_name:
         profile.sunshine_name = profile.name
     ensure_profile_unique_files(profile)
@@ -1027,10 +1057,22 @@ class EditDialog(QtWidgets.QDialog):
 
 # ------------------------------ Main Window ----------------------------------
 class Main(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, tray_enabled: bool = False, start_minimized: bool = False):
         super().__init__()
+        self.tray_enabled = bool(tray_enabled and QtWidgets.QSystemTrayIcon.isSystemTrayAvailable())
+        self._start_minimized = bool(start_minimized)
+        self._quit_requested = False
+        self._tray_icon: Optional[QtWidgets.QSystemTrayIcon] = None
+        self._tray_menu: Optional[QtWidgets.QMenu] = None
+        self._tray_hint_shown = False
+
         self.setWindowTitle(APP_NAME)
         self.resize(1120, 640)
+        if self.tray_enabled:
+            try:
+                self.setWindowIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
+            except Exception:
+                pass
 
         self.profiles: List[InstanceProfile] = load_profiles()
         used_ports: List[int] = []
@@ -1040,7 +1082,7 @@ class Main(QtWidgets.QMainWindow):
             repair_profile_defaults(profile)
             if any(abs(profile.web_port - port) < SUNSHINE_PORT_STRIDE for port in used_ports):
                 preferred = SUNSHINE_BASE_PORT_DEFAULT + len(used_ports) * SUNSHINE_PORT_STRIDE
-                profile.web_port = next_available_port(preferred, used_ports)
+                profile.web_port = find_free_sunshine_base_port(preferred, used_ports)
             if profile.web_port != original_port:
                 ports_changed = True
             used_ports.append(profile.web_port)
@@ -1083,6 +1125,11 @@ class Main(QtWidgets.QMainWindow):
         a_openlog = QtGui.QAction("Open Log", self);  a_openlog.triggered.connect(self.open_log)
         for action in (a_launch, a_stop, a_open, a_openweb, a_checkport, a_save, a_openlog):
             tb.addAction(action)
+        if self.tray_enabled:
+            tb.addSeparator()
+            a_tray = QtGui.QAction("To Tray", self)
+            a_tray.triggered.connect(lambda: self.hide_to_tray())
+            tb.addAction(a_tray)
 
         self.status = self.statusBar()
         self.credit_label = QtWidgets.QLabel("made with <3 by neo0oen")
@@ -1115,6 +1162,84 @@ class Main(QtWidgets.QMainWindow):
         self.timer.setInterval(3000)
         self.timer.timeout.connect(self.refresh_pids)
         self.timer.start()
+
+        if self.tray_enabled:
+            self._setup_tray()
+            if self._start_minimized:
+                QtCore.QTimer.singleShot(0, lambda: self.hide_to_tray())
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self.tray_enabled and not self._quit_requested:
+            event.ignore()
+            self.hide_to_tray()
+            return
+        super().closeEvent(event)
+
+    def _setup_tray(self) -> None:
+        icon = self.windowIcon()
+        if icon.isNull():
+            try:
+                icon = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
+            except Exception:
+                icon = QtGui.QIcon()
+        tray = QtWidgets.QSystemTrayIcon(icon, self)
+        tray.setToolTip(APP_NAME)
+
+        menu = QtWidgets.QMenu()
+        act_show = menu.addAction("Show")
+        act_show.triggered.connect(self.show_from_tray)
+        act_hide = menu.addAction("Hide")
+        act_hide.triggered.connect(lambda: self.hide_to_tray())
+        menu.addSeparator()
+        act_quit = menu.addAction("Quit")
+        act_quit.triggered.connect(self.quit_from_tray)
+
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+
+        self._tray_icon = tray
+        self._tray_menu = menu
+
+    def _on_tray_activated(self, reason) -> None:
+        try:
+            activation = QtWidgets.QSystemTrayIcon.ActivationReason
+            if reason in (activation.Trigger, activation.DoubleClick):
+                self.toggle_from_tray()
+        except Exception:
+            self.toggle_from_tray()
+
+    def toggle_from_tray(self) -> None:
+        if self.isVisible():
+            self.hide_to_tray()
+        else:
+            self.show_from_tray()
+
+    def show_from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def hide_to_tray(self) -> None:
+        if not self.tray_enabled:
+            self.showMinimized()
+            return
+        self.hide()
+        if self._tray_icon and not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            try:
+                self._tray_icon.showMessage(APP_NAME, "Running in the system tray. Double-click to open; right-click to quit.")
+            except Exception:
+                pass
+
+    def quit_from_tray(self) -> None:
+        self._quit_requested = True
+        if self._tray_icon:
+            try:
+                self._tray_icon.hide()
+            except Exception:
+                pass
+        self.close()
 
     # ---- helpers ----
     def selected_row(self) -> int:
@@ -1468,17 +1593,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--self-test", action="store_true", help="Run a non-GUI smoke test")
     parser.add_argument("--exec-path", help="Override Sunshine/Apollo executable for self-test")
     parser.add_argument("--config-path", help="Override base config for self-test")
+    parser.add_argument("--elevate", action="store_true", help="Relaunch as Administrator (Windows only)")
+    parser.add_argument("--tray", action="store_true", help="Enable system tray icon; closing the window hides to tray")
+    parser.add_argument("--start-minimized", action="store_true", help="Start hidden in tray (implies --tray)")
+    parser.add_argument("--background", action="store_true", help="Alias for --tray --start-minimized")
     args, qt_args = parser.parse_known_args(argv_list)
 
     if args.self_test:
         return run_self_test(args.exec_path, args.config_path)
 
+    if args.background:
+        args.tray = True
+        args.start_minimized = True
+    if args.start_minimized:
+        args.tray = True
+
+    if args.elevate and os.name == "nt" and not is_windows_admin():
+        relaunch_args = [a for a in argv_list if a != "--elevate"]
+        LOGGER.info("Elevation requested; relaunching as Administrator")
+        if relaunch_as_admin(relaunch_args):
+            return 0
+        _show_startup_error(APP_NAME, "Administrator elevation was cancelled or failed.")
+        return 1
+
     qt_argv = [sys.argv[0]] + qt_args
     LOGGER.info("Starting GUI with Qt args: %s", qt_args)
     app = QtWidgets.QApplication(qt_argv)
     app.setApplicationName(APP_NAME)
-    window = Main()
-    window.show()
+    if args.tray:
+        app.setQuitOnLastWindowClosed(False)
+    window = Main(tray_enabled=bool(args.tray), start_minimized=bool(args.start_minimized))
+    if args.start_minimized and getattr(window, "tray_enabled", False):
+        pass
+    else:
+        window.show()
     exit_code = app.exec()
     LOGGER.info("GUI terminated with exit code %s", exit_code)
     return exit_code
