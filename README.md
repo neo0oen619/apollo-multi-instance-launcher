@@ -1,5 +1,7 @@
 # Apollo Multi-Instance Launcher (a.k.a. "Why run one Sunshine when you can juggle several?")
 
+- **Apollo** by **ClassicOldSong**: https://github.com/ClassicOldSong/Apollo  
+
 Welcome to a small GUI that keeps Apollo/Sunshine wrangled on Windows. It builds one sandbox per profile, rewrites configs, and launches **multiple Apollo/Sunshine instances on the same PC under the same Windows user**—each instance isolated so your setup doesn’t dissolve into shared logs and shared sins.
 
 A single instance of Sunshine is like a single cookie—useless once the family arrives. We automate the second, third, and yes… fifth cookie.
@@ -169,7 +171,9 @@ MIT-ish (check `MDFILES/LICENSE.txt`). Share, break, improve—just don’t pawn
 ---
 
 ## Credits
-*Made with <3 by neo0oen* — across a purple neon label at the bottom-left of the window.  
-Hazardous code clean-up performed by Codex CLI, powered by GPT-5-class LLMs that never sleep and seldom blink.
+- **Apollo** by **ClassicOldSong**: https://github.com/ClassicOldSong/Apollo  
+- *This launcher* made with <3 by **neo0oen** — across a purple neon label at the bottom-left of the window.  
+- Hazardous code clean-up performed by Codex CLI, powered by GPT-5-class LLMs that never sleep and seldom blink.
 
 Stay weird, stay multi-instance.
+
