@@ -237,12 +237,27 @@ def normpath(p: str) -> str:
     return str(Path(p)).replace("\\", "/")
 
 
+SUNSHINE_BASE_PORT_DEFAULT = 47989
+SUNSHINE_WEB_UI_OFFSET = 1
+SUNSHINE_PORT_STRIDE = 100
+SUNSHINE_PORT_FAMILY_MIN_OFFSET = -5
+SUNSHINE_PORT_FAMILY_MAX_OFFSET = 21
+SUNSHINE_BASE_PORT_MIN = max(1024, 1024 - SUNSHINE_PORT_FAMILY_MIN_OFFSET)
+SUNSHINE_BASE_PORT_MAX = 65535 - SUNSHINE_PORT_FAMILY_MAX_OFFSET
+
+
 def find_free_port(start: int = 47989, limit: int = 200) -> int:
     import socket
-    for port in range(start, start + limit):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    start = max(1024, start)
+    for port in range(start, min(start + limit, 65536)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_sock:
             try:
-                s.bind(("127.0.0.1", port))
+                tcp_sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_sock:
+            try:
+                udp_sock.bind(("127.0.0.1", port))
                 return port
             except OSError:
                 continue
@@ -289,13 +304,84 @@ def detect_default_exec_and_config() -> Tuple[Optional[Path], Optional[Path]]:
     return exec_candidate, config_candidate
 
 
+def sunshine_web_ui_port(base_port: int) -> int:
+    return int(base_port) + SUNSHINE_WEB_UI_OFFSET
+
+
+def sunshine_port_family(base_port: int) -> List[Tuple[str, int]]:
+    base_port = int(base_port)
+    if base_port <= 0:
+        return []
+
+    tcp_ports = [
+        base_port + SUNSHINE_PORT_FAMILY_MIN_OFFSET,
+        base_port,
+        sunshine_web_ui_port(base_port),
+        base_port + SUNSHINE_PORT_FAMILY_MAX_OFFSET,
+    ]
+    udp_ports = list(range(base_port + 9, base_port + SUNSHINE_PORT_FAMILY_MAX_OFFSET + 1))
+
+    family: List[Tuple[str, int]] = []
+    for port in tcp_ports:
+        if 1 <= port <= 65535:
+            family.append(("tcp", port))
+    for port in udp_ports:
+        if 1 <= port <= 65535:
+            family.append(("udp", port))
+    return family
+
+
+def _can_bind_port(proto: str, port: int, host: str = "0.0.0.0") -> bool:
+    import socket
+    sock_type = socket.SOCK_STREAM if proto.lower() == "tcp" else socket.SOCK_DGRAM
+    try:
+        sock = socket.socket(socket.AF_INET, sock_type)
+    except OSError:
+        return False
+    with sock:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except OSError:
+                pass
+        try:
+            sock.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def sunshine_port_family_busy(base_port: int) -> List[Tuple[str, int]]:
+    busy: List[Tuple[str, int]] = []
+    for proto, port in sunshine_port_family(base_port):
+        if not _can_bind_port(proto, port):
+            busy.append((proto, port))
+    return busy
+
+
 def next_available_port(preferred: int, existing_ports: List[int]) -> int:
-    port = max(preferred, 1024)
-    while True:
-        candidate = find_free_port(port)
-        if candidate not in existing_ports:
-            return candidate
-        port = candidate + 1
+    candidate = max(int(preferred), SUNSHINE_BASE_PORT_MIN)
+    candidate = min(candidate, SUNSHINE_BASE_PORT_MAX)
+    while any(abs(candidate - p) < SUNSHINE_PORT_STRIDE for p in existing_ports):
+        candidate += SUNSHINE_PORT_STRIDE
+        if candidate > SUNSHINE_BASE_PORT_MAX:
+            candidate = SUNSHINE_BASE_PORT_MAX
+            break
+    return candidate
+
+
+def find_free_sunshine_base_port(start: int, used_ports: List[int], limit: int = 2000) -> int:
+    start = max(int(start), SUNSHINE_BASE_PORT_MIN)
+    start = min(start, SUNSHINE_BASE_PORT_MAX)
+    candidate = next_available_port(start, used_ports)
+    for _ in range(limit):
+        if candidate > SUNSHINE_BASE_PORT_MAX:
+            break
+        if sunshine_port_family_busy(candidate):
+            candidate = next_available_port(candidate + SUNSHINE_PORT_STRIDE, used_ports)
+            continue
+        return candidate
+    return candidate
 
 
 
@@ -326,7 +412,8 @@ def auto_profile_from_name(name: str, existing: List[InstanceProfile]) -> Option
     if exec_path is None or base_config is None:
         return None
     existing_ports = [p.web_port for p in existing]
-    suggested_port = next_available_port(47989 + len(existing) * 2, existing_ports)
+    preferred_port = SUNSHINE_BASE_PORT_DEFAULT + len(existing) * SUNSHINE_PORT_STRIDE
+    suggested_port = find_free_sunshine_base_port(preferred_port, existing_ports)
     cleaned_name = name.strip() or "Seat"
     slug = safe_slug(cleaned_name)
     sunshine_name = cleaned_name
@@ -357,8 +444,8 @@ def repair_profile_defaults(profile: InstanceProfile) -> None:
         profile.exec_path = str(detected_exec)
     if base_config in {"", "."} and detected_conf is not None:
         profile.base_config = str(detected_conf)
-    if profile.web_port < 1024:
-        profile.web_port = find_free_port(47989)
+    if profile.web_port < SUNSHINE_BASE_PORT_MIN or profile.web_port > SUNSHINE_BASE_PORT_MAX:
+        profile.web_port = find_free_port(SUNSHINE_BASE_PORT_DEFAULT)
     if not profile.sunshine_name:
         profile.sunshine_name = profile.name
     ensure_profile_unique_files(profile)
@@ -719,7 +806,7 @@ def run_self_test(exec_override: Optional[str] = None, config_override: Optional
         name=f"SelfTest-{datetime.now().strftime('%H%M%S')}",
         exec_path=str(exec_path),
         base_config=str(base_config),
-        web_port=find_free_port(47000),
+        web_port=find_free_sunshine_base_port(47000, []),
         sunshine_name=f"Apollo SelfTest {datetime.now().strftime('%H:%M:%S')}",
         apps_file="apps.json",
         state_file="sunshine_state.json",
@@ -728,7 +815,7 @@ def run_self_test(exec_override: Optional[str] = None, config_override: Optional
         pkey_file="pkey.pem",
         cert_file="cert.pem",
         run_as_mode="current",
-        extra_args=""
+        extra_args="",
     )
 
     prepare_profile_runtime(profile)
@@ -757,7 +844,7 @@ def run_self_test(exec_override: Optional[str] = None, config_override: Optional
 
 # ------------------------------ Qt Models/Views ------------------------------
 class ProfileTable(QtCore.QAbstractTableModel):
-    HEAD = ["Name", "Exec", "Base Conf", "Port", "Name in UI", "User", "PID"]
+    HEAD = ["Name", "Exec", "Base Conf", "Base Port", "Name in UI", "User", "PID"]
     def __init__(self, items: List[InstanceProfile]):
         super().__init__()
         self.items = items
@@ -786,7 +873,9 @@ class EditDialog(QtWidgets.QDialog):
         self.cfg = QtWidgets.QLineEdit()
         self.cfg_btn = QtWidgets.QPushButton("Browse...")
 
-        self.port = QtWidgets.QSpinBox(); self.port.setRange(1024, 65535); self.port.setValue(find_free_port())
+        self.port = QtWidgets.QSpinBox()
+        self.port.setRange(SUNSHINE_BASE_PORT_MIN, SUNSHINE_BASE_PORT_MAX)
+        self.port.setValue(find_free_sunshine_base_port(SUNSHINE_BASE_PORT_DEFAULT, []))
         self.display_name = QtWidgets.QLineEdit("Apollo")
 
         # User/RunAs
@@ -818,7 +907,7 @@ class EditDialog(QtWidgets.QDialog):
         form.addRow("Profile name:", self.name)
         form.addRow("Executable:", ex_l)
         form.addRow("Base config:", cf_l)
-        form.addRow("Web UI port:", self.port)
+        form.addRow("Base port:", self.port)
         form.addRow("sunshine_name:", self.display_name)
 
         # RunAs row
@@ -945,11 +1034,21 @@ class Main(QtWidgets.QMainWindow):
 
         self.profiles: List[InstanceProfile] = load_profiles()
         used_ports: List[int] = []
+        ports_changed = False
         for profile in self.profiles:
+            original_port = profile.web_port
             repair_profile_defaults(profile)
-            if profile.web_port in used_ports:
-                profile.web_port = next_available_port(profile.web_port + 1, used_ports)
+            if any(abs(profile.web_port - port) < SUNSHINE_PORT_STRIDE for port in used_ports):
+                preferred = SUNSHINE_BASE_PORT_DEFAULT + len(used_ports) * SUNSHINE_PORT_STRIDE
+                profile.web_port = next_available_port(preferred, used_ports)
+            if profile.web_port != original_port:
+                ports_changed = True
             used_ports.append(profile.web_port)
+        if ports_changed:
+            try:
+                save_profiles(self.profiles)
+            except Exception as exc:
+                LOGGER.warning("Failed to auto-save adjusted ports: %s", exc)
         LOGGER.info("Loaded %d profile(s)", len(self.profiles))
         self.model = ProfileTable(self.profiles)
 
@@ -1146,7 +1245,7 @@ class Main(QtWidgets.QMainWindow):
         if row < 0:
             return
         profile = self.profiles[row]
-        LOGGER.info("Launching profile '%s' on port %s", profile.name, profile.web_port)
+        LOGGER.info("Launching profile '%s' on base port %s", profile.name, profile.web_port)
         exec_path = Path(profile.exec_path)
         if not exec_path.exists():
             LOGGER.error("Executable missing for profile '%s': %s", profile.name, exec_path)
@@ -1159,21 +1258,39 @@ class Main(QtWidgets.QMainWindow):
             return
         working_dir = exec_path.parent
 
-        import socket
-        busy = False
-        with socket.socket() as sock:
-            try:
-                sock.bind(("127.0.0.1", profile.web_port))
-            except OSError:
-                busy = True
-        if busy:
-            suggested = find_free_port(profile.web_port + 1, 50)
-            LOGGER.warning("Port %s busy for profile '%s'; suggesting %s", profile.web_port, profile.name, suggested)
-            if QtWidgets.QMessageBox.question(self, "Port busy", f"Port {profile.web_port} is in use. Use {suggested} instead?") == QtWidgets.QMessageBox.Yes:
+        busy_ports = sunshine_port_family_busy(profile.web_port)
+        if busy_ports:
+            if profile.last_pid and psutil.pid_exists(profile.last_pid):
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Already running",
+                    f"Profile '{profile.name}' appears to be running (PID {profile.last_pid}).\nUse 'Open Web UI' or stop the running instance first.",
+                )
+                return
+
+            other_ports = [p.web_port for p in self.profiles if p is not profile]
+            suggested = find_free_sunshine_base_port(profile.web_port + SUNSHINE_PORT_STRIDE, other_ports)
+            shown = ", ".join(f"{proto.upper()} {port}" for proto, port in busy_ports[:6])
+            if len(busy_ports) > 6:
+                shown = f"{shown}, …(+{len(busy_ports) - 6} more)"
+
+            LOGGER.warning(
+                "Port family busy for profile '%s' (base %s): %s; suggesting base %s",
+                profile.name,
+                profile.web_port,
+                shown,
+                suggested,
+            )
+            prompt = (
+                f"Some required ports for base port {profile.web_port} are already in use:\n{shown}\n\n"
+                f"Switch this profile to base port {suggested}?\n"
+                f"(Web UI will be https://localhost:{sunshine_web_ui_port(suggested)})"
+            )
+            if QtWidgets.QMessageBox.question(self, "Ports in use", prompt) == QtWidgets.QMessageBox.Yes:
                 profile.web_port = suggested
                 self.model.layoutChanged.emit()
                 self.save()
-                LOGGER.info("Profile '%s' switched to port %s", profile.name, profile.web_port)
+                LOGGER.info("Profile '%s' switched to base port %s", profile.name, profile.web_port)
             else:
                 return
 
@@ -1256,7 +1373,7 @@ class Main(QtWidgets.QMainWindow):
         if row < 0:
             return
         profile = self.profiles[row]
-        url = f"https://localhost:{profile.web_port}"
+        url = f"https://localhost:{sunshine_web_ui_port(profile.web_port)}"
         LOGGER.info("Opening Web UI for profile '%s' -> %s", profile.name, url)
         import webbrowser
         webbrowser.open(url)
@@ -1266,9 +1383,36 @@ class Main(QtWidgets.QMainWindow):
         if row < 0:
             return
         profile = self.profiles[row]
-        suggested = find_free_port(max(1024, profile.web_port))
-        LOGGER.info("Port check for profile '%s': current %s, suggested %s", profile.name, profile.web_port, suggested)
-        QtWidgets.QMessageBox.information(self, "Port check", f"Current: {profile.web_port}\nSuggested free port: {suggested}")
+        base_port = profile.web_port
+        family = sunshine_port_family(base_port)
+        tcp_ports = sorted({port for proto, port in family if proto == "tcp"})
+        udp_ports = sorted({port for proto, port in family if proto == "udp"})
+        busy_ports = sunshine_port_family_busy(base_port)
+
+        other_ports = [p.web_port for p in self.profiles if p is not profile]
+        suggested = find_free_sunshine_base_port(base_port + SUNSHINE_PORT_STRIDE, other_ports)
+
+        busy_summary = ", ".join(f"{proto.upper()} {port}" for proto, port in busy_ports[:6]) if busy_ports else "(none)"
+        if busy_ports and len(busy_ports) > 6:
+            busy_summary = f"{busy_summary}, …(+{len(busy_ports) - 6} more)"
+
+        udp_hint = f"{udp_ports[0]}-{udp_ports[-1]}" if udp_ports else "(none)"
+        message = (
+            f"Base port: {base_port}\n"
+            f"Web UI: https://localhost:{sunshine_web_ui_port(base_port)}\n\n"
+            f"Required TCP: {', '.join(str(p) for p in tcp_ports)}\n"
+            f"Required UDP: {udp_hint}\n\n"
+            f"Busy right now: {busy_summary}\n"
+            f"Suggested base port: {suggested} (Web UI: https://localhost:{sunshine_web_ui_port(suggested)})"
+        )
+        LOGGER.info(
+            "Port check for profile '%s': base %s, busy=%s, suggested base=%s",
+            profile.name,
+            base_port,
+            bool(busy_ports),
+            suggested,
+        )
+        QtWidgets.QMessageBox.information(self, "Port check", message)
 
     def open_log(self):
         log_path = Path(ACTIVE_LOG_PATH)
