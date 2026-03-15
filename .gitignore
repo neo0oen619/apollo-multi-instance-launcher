@@ -1,0 +1,35 @@
+# Screenshots
+screenshot_*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.env
+.env.local
+
+# Apollo runtime (ProgramData is system location)
+*.conf.bak
+*.log
+
+# Backups
+*.backup
+*.tmp

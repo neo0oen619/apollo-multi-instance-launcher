@@ -41,6 +41,141 @@ One machine, one user session, **multiple independent Apollo/Sunshine processes*
 
 ---
 
+## CLI Tools
+
+Command-line utilities are provided in the `cli/` directory for automated control and monitoring.
+
+### screenshot.py
+Capture screenshot from specified monitor.
+
+```bash
+python cli/screenshot.py 0  # Monitor 0
+python cli/screenshot.py 1  # Monitor 1
+```
+
+Output: `screenshot_monitor{N}_{TIMESTAMP}.png`
+
+### moonlight_status.py
+Check status of all Apollo instances.
+
+```bash
+python cli/moonlight_status.py
+```
+
+Output:
+```
+Apollo Instance Status:
+----------------------------------------
+  Port 47990: [UP]
+  Port 48090: [UP]
+  Port 48190: [DOWN]
+----------------------------------------
+Total: 2/5 instances running
+```
+
+### launch_background.py
+Launch all instances in headless mode.
+
+```bash
+python cli/launch_background.py
+```
+
+See `cli/README.md` for detailed documentation.
+
+---
+
+## Moonlight Remote Desktop Setup
+
+Stream Apollo instances to Moonlight clients over LAN using NVIDIA NVENC hardware encoding.
+
+### Quick Setup (5 Minutes)
+
+**On Host PC (This One):**
+1. Run GUI launcher: `python apollo_multi_launcher.py`
+2. Create profile per monitor (Screen1 → port 47989, Screen2 → 48089, etc.)
+3. Open `http://localhost:47990` → Configuration → Video:
+   - Encoder: **NVENC**
+   - Codec: **H.265/HEVC**
+   - Bitrate: **50 Mbps** (adjust for your LAN)
+4. Enable pairing for each instance
+
+**On Client PC (Moonlight 100.70.191.47):**
+1. Open Moonlight Desktop
+2. Add host: `<HOST_IP>:47990`
+3. Apollo shows PIN → enter in Moonlight
+4. Stream any profile → verify display appears
+5. Test mouse/keyboard input
+
+### Port Allocation
+
+| Instance | Port | Web UI | Display |
+|----------|------|--------|---------|
+| Screen 1 | 47989 | 47990  | Monitor 0 |
+| Screen 2 | 48089 | 48090  | Monitor 1 |
+| Screen 3 | 48189 | 48190  | Monitor 2 |
+
+Port stride: `+100` per instance (configurable)
+
+### Configuration Template
+
+A reference configuration is available at `configs/apollo-nvenc-template.conf`. Copy and customize for your setup:
+
+```bash
+cp configs/apollo-nvenc-template.conf my-profile.conf
+# Edit my-profile.conf with your bitrate, codecs, etc.
+```
+
+### Troubleshooting
+
+**"Moonlight can't connect"**
+- Verify Apollo instances are running: `python cli/moonlight_status.py`
+- Check firewall allows TCP/UDP on Apollo ports (47989+)
+- Ensure client has network path to host
+
+**"Lag or frame drops"**
+- Reduce bitrate in Apollo settings
+- Check LAN speed: target 50-100 Mbps for 1080p@60
+- Switch to H.264 if H.265 unsupported on client
+
+**"Black screen after pairing"**
+- Verify monitor index matches Apollo profile
+- Restart instance: `python apollo_multi_launcher.py` → right-click profile → Restart
+
+### Network Requirements
+
+- **LAN:** Host and client must be on same network (or routable IP)
+- **Bandwidth:** 50 Mbps minimum for 1080p@60 (hardware dependent)
+- **Latency:** <30 ms ideal (100+ ms starts feeling sluggish)
+
+---
+
+## Claude CLI Integration (Swarm Skill)
+
+Control Apollo from Claude CLI using the `moonlight-control` skill.
+
+```bash
+# Check status
+claude-code moonlight-control:status
+
+# Take screenshot
+claude-code moonlight-control:screenshot 0
+
+# Launch instances
+claude-code moonlight-control:launch
+
+# List profiles
+claude-code moonlight-control:list-profiles
+```
+
+See `skills/moonlight-control/skill.md` for full documentation.
+
+To enable: set `APOLLO_REPO` environment variable:
+```bash
+export APOLLO_REPO=$(pwd)
+```
+
+---
+
 ## Installation (Windows)
 ```powershell
 # Optional: use a virtualenv if you’re into healthy habits
@@ -173,6 +308,31 @@ A: Most logic is cross-platform, but the GUI focus and silent launch polish targ
 
 ## License
 MIT-ish (check `MDFILES/LICENSE.txt`). Share, break, improve—just don’t pawn it off as your own without buying us coffee. (that was a joke XD) feel free to use it as you wish humans :]
+
+---
+
+## File Structure
+
+```
+apollo-multi-instance-launcher/
+├── apollo_multi_launcher.py          # Main GUI launcher
+├── ApolloLauncher_Admin.cmd          # Admin launcher shortcut
+├── README.md                         # This file
+├── cli/                              # Command-line tools
+│   ├── __init__.py
+│   ├── screenshot.py                 # Screenshot capture
+│   ├── moonlight_status.py           # Instance health check
+│   ├── launch_background.py          # Headless launcher
+│   └── README.md                     # CLI documentation
+├── configs/                          # Configuration templates
+│   └── apollo-nvenc-template.conf    # NVENC reference config
+└── skills/                           # Claude CLI integration
+    └── moonlight-control/
+        ├── skill.md                  # Skill documentation
+        └── handler.py                # Python skill handler
+
+Runtime data: C:\ProgramData\ApolloLauncher\
+```
 
 ---
 
